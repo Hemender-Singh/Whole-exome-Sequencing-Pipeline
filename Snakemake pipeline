@@ -1,0 +1,229 @@
+# File: Snakefile
+
+# Define paths
+WORKDIR = "/path/to/working_directory"
+
+#  all defines the final output files
+ all:
+    input:
+        "mergedwes1kg_clean_prune_pca.eigenvec"
+
+# Step 1: Read Input Data
+Download_reference_genome:
+    output:
+        "ref_genome/hg38.fa.gz"
+    shell:
+        "wget -O {output} https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz"
+
+index_reference_genome:
+    input:
+        "ref_genome/hg38.fa.gz"
+    output:
+        "ref_genome/hg38.fa.bwt"
+    shell:
+        "bwa index -a bwtsw {input}"
+
+# Step 2: Trimming
+ trimmomatic:
+    input:
+        r1="raw_data/YOURFILE_R1.fastq.gz",
+        r2="raw_data/YOURFILE_R2.fastq.gz"
+    output:
+        r1_paired="trimmed/YOURFILE_R1_paired.fq.gz",
+        r1_unpaired="trimmed/YOURFILE_R1_unpaired.fq.gz",
+        r2_paired="trimmed/YOURFILE_R2_paired.fq.gz",
+        r2_unpaired="trimmed/YOURFILE_R2_unpaired.fq.gz"
+    params:
+        trimmomatic_jar="~/Desktop/GenomicsApps/Trimmomatic-0.36/trimmomatic-0.36.jar",
+        adapter="TruSeq3-PE.fa"
+    shell:
+        """
+        java -jar {params.trimmomatic_jar} PE {input.r1} {input.r2} {output.r1_paired} {output.r1_unpaired} {output.r2_paired} {output.r2_unpaired} \
+        ILLUMINACLIP:{params.adapter}:2:30:10:2:keepBothReads TRAILING:3 MINLEN:30
+        """
+
+# Step 3: Alignment
+ bwa_mem:
+    input:
+        ref="ref_genome/hg38.fa.gz",
+        r1="trimmed/YOURFILE_R1_paired.fq.gz",
+        r2="trimmed/YOURFILE_R2_paired.fq.gz"
+    output:
+        "aligned/yourfile.sam"
+    params:
+        rg="@RG\\tID:os22\\tLB:Oral_Cancer\\tPL:Illumina\\tPU:Unknown\\tSM:Case"
+    threads: 12
+    shell:
+        "bwa mem -t {threads} -R '{params.rg}' {input.ref} {input.r1} {input.r2} > {output}"
+
+# Step 4: Post-Alignment Processing
+ sam_to_bam:
+    input:
+        "aligned/yourfile.sam"
+    output:
+        "aligned_bam/yourfile.bam"
+    threads: 12
+    shell:
+        "samtools view -@ {threads} -S -b -h -o {output} {input}"
+
+ sort_bam:
+    input:
+        "aligned_bam/yourfile.bam"
+    output:
+        "sorted_bam/yourfile_sorted.bam"
+    threads: 12
+    shell:
+        "samtools sort --threads {threads} -o {output} {input}"
+
+ index_bam:
+    input:
+        "sorted_bam/yourfile_sorted.bam"
+    output:
+        "sorted_bam/yourfile_sorted.bam.bai"
+    threads: 12
+    shell:
+        "samtools index -@ {threads} {input}"
+
+ mark_duplicates:
+    input:
+        "sorted_bam/yourfile_sorted.bam"
+    output:
+        bam="dedup_bam/yourfile_dedup.bam",
+        metrics="dedup_bam/yourfile_metrics.txt"
+    params:
+        picard="~/Desktop/GenomicsApps/picard/picard.jar"
+    shell:
+        """
+        java -Xmx12g -jar {params.picard} MarkDuplicates I={input} O={output.bam} M={output.metrics} REMOVE_DUPLICATES=true CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT
+        """
+
+# Step 5: Variant Calling and Filtering
+ haplotype_caller:
+    input:
+        ref="ref_genome/hg38.fa.gz",
+        bam="dedup_bam/yourfile_dedup.bam"
+    output:
+        vcf="vcf_out/yourfile.vcf.gz",
+        bamout="realigned_bam/yourfile.bam"
+    params:
+        gatk="~/Desktop/GenomicsApps/gatk-4.1.8.1/gatk"
+    shell:
+        """
+        {params.gatk} --java-options "-Xmx12g" HaplotypeCaller -R {input.ref} --input {input.bam} --output {output.vcf} --bamout {output.bamout}
+        """
+
+ variant_filtration:
+    input:
+        "vcf_out/yourfile.vcf.gz"
+    output:
+        "filtered_vcf/yourfile.filtered.vcf"
+    params:
+        gatk="~/Desktop/GenomicsApps/gatk-4.1.8.1/gatk"
+    shell:
+        """
+        {params.gatk} VariantFiltration -V {input} -O {output} --filter-expression "QD<2.0" --filter-name "LowDepthQual" --filter-expression "FS>60.0" --filter-name "HighStrandBias" --filter-expression "SOR>3.0" --filter-name "HighSystemicOddRatio" --filter-expression "MQ<50.0" --filter-name "LowMapQual" --filter-expression "MQRankSum<-12.5" --filter-name "LowMapQualRankSum" --filter-expression "ReadPosRankSum<-8.0" --filter-name "FailedRankSumTestforPosReads"
+        """
+
+# Step 6: Annotation
+ annovar_annotation:
+    input:
+        "filtered_vcf/yourfile.filtered.vcf"
+    output:
+        "annotated/yourfile.txt"
+    params:
+        annovar="~/Desktop/GenomicsApps/annovar"
+    shell:
+        """
+        {params.annovar}/convert2annovar.pl -format vcf4 {input} > annovar_input/yourfile.avinput
+        {params.annovar}/table_annovar.pl annovar_input/yourfile.avinput {params.annovar}/humandb/ --buildver hg38 --out {output} --remove --protocol refGene,dbnsfp30a,gnomad_exome,1000g2010nov,snp130,clinvar_20131105,exac03 --operation g,f,f,f,f,f,f --nastring . --vcfinput
+        """
+
+# Step 7: VCF Filtering and Splitting by Chromosome
+ filter_vcf:
+    input:
+        "filtered_vcf/yourfile.filtered.vcf"
+    output:
+        "filtered_by_site.vcf"
+    shell:
+        "vcftools --vcf {input} --max-missing 0.85 --recode --recode-INFO-all --out {output}"
+
+ split_by_chromosome:
+    input:
+        "filtered_by_site.vcf"
+    output:
+        expand("vcf_by_chrom/chr{chr}.vcf.gz", chr=range(1, 23))
+    shell:
+        """
+        bcftools view -Oz -o {input}.gz {input}
+        bcftools index {input}.gz
+        for chr in {1..22}; do
+            bcftools view -r $chr {input}.gz -Oz -o vcf_by_chrom/chr${{chr}}.vcf.gz
+            bcftools index vcf_by_chrom/chr${{chr}}.vcf.gz
+        done
+        """
+
+# Step 8: Merging Chromosomes
+ merge_chromosomes:
+    input:
+        vcf_files=expand("vcf_by_chrom/chr{chr}.vcf.gz", chr=range(1, 23))
+    output:
+        "final_merged.vcf.gz"
+    shell:
+        """
+        bcftools concat -Oz -o {output} {input.vcf_files}
+        bcftools index {output}
+        """
+
+# Step 9: Runs of Homozygosity Analysis
+ run_roh:
+    input:
+        "final_merged.vcf.gz"
+    output:
+        "roh/roh_output.txt"
+    shell:
+        """
+        plink --vcf {input} --make-bed --out roh/merged_all_chromosomes
+        plink --bfile roh/merged_all_chromosomes --homozyg --homozyg-window-snp 50 --homozyg-window-missing 3 --homozyg-kb 100 --homozyg-density 1000 --out {output}
+        """
+
+# Step 10: Merging with 1000 Genome Data
+ download_1000G_data:
+    output:
+        "1000G/1000G_hg38.vcf.gz"
+    shell:
+        "wget -O {output} http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/release/20181203_biallelic_SNV/ALL.wgs.shapeit2_integrated_v1a.GRCh38.20181129.sites.vcf.gz"
+
+ preprocess_1000G_data:
+    input:
+        "1000G/1000G_hg38.vcf.gz"
+    output:
+        "1000G/1000G_hg38_preprocessed.vcf.gz"
+    shell:
+        """
+        zcat {input} | sed 's/^#CHROM.*/#CHROM\\tPOS\\tID\\tREF\\tALT\\tQUAL\\tFILTER\\tINFO\\tFORMAT\\tDUMMY_SAMPLE/' | sed 's/$/\\t0\\/0/' | bgzip > {output}
+        bcftools index {output}
+        """
+
+ merge_with_1000G:
+    input:
+        wes="final_merged.vcf.gz",
+        thousandG="1000G/1000G_hg38_preprocessed.vcf.gz"
+    output:
+        "merged_wes_1000G.vcf.gz"
+    shell:
+        """
+        bcftools merge -Oz -o {output} {input.wes} {input.thousandG}
+        bcftools index {output}
+        """
+
+# Step 11: Principal Component Analysis (PCA)
+ pca:
+    input:
+        "merged_wes_1000G.vcf.gz"
+    output:
+        "mergedwes1kg_clean_prune_pca.eigenvec"
+    shell:
+        """
+        plink --vcf {input} --make-bed --out pca/merged_all
+        plink --bfile pca/merged_all --pca 20 --out pca/mergedwes1kg_clean_prune_pca
+        """
