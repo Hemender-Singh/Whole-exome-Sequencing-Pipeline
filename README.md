@@ -1,6 +1,8 @@
 # Whole-exome-Sequencing-Pipeline
 This is an automated Snakemake Whole exome sequencing pipline which cover the annotation of varaints, PCA analysis by merging your data with 1000 genome data and performing the runs of homozygosity testing of your data.
 
+############Do let me know if you face any problem in running the code##############
+
 Requirements
 Ensure all required tools (e.g., BWA, GATK, PLINK, ANNOVAR) are installed and accessible in your PATH.
 This pipeline is generated1 for Snakemake version 5.26.1.
